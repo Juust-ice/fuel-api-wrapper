@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Fuel Intelligence Map</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+  <style>
+    body { margin: 0; font-family: Arial; }
+    #map { height: 100vh; width: 100%; }
+
+    .info {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 999;
+      background: white;
+      padding: 10px;
+      border-radius: 10px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+    }
+
+    input {
+      display: block;
+      margin: 5px 0;
+      padding: 5px;
+      width: 220px;
+    }
+
+    button {
+      padding: 6px 10px;
+      cursor: pointer;
+    }
+
+    #costBox {
+      margin-top: 10px;
+      font-weight: bold;
+      padding: 8px;
+      background: #f4f4f4;
+      border-radius: 6px;
+    }
+  </style>
+</head>
+
+<body>
+
+<div class="info">
+  ⛽ Fuel Intelligence Map<br>
+  🟢 cheap → 🔴 expensive
+
+  <br><br>
+  <input id="origin" placeholder="Origin city (e.g. Dallas)" />
+  <input id="dest" placeholder="Destination city (e.g. Denver)" />
+  <input id="mpg" placeholder="Your MPG (e.g. 30)" />
+  <input id="range" placeholder="Fuel range (miles per tank)" />
+
+  <button onclick="drawRoute()">Draw Route</button>
+
+  <div id="costBox">💰 Total Trip Cost: --</div>
+</div>
+
+<div id="map"></div>
+
+<script>
+
+// -------------------------------
+// MAP INIT
+// -------------------------------
+const map = L.map("map").setView([39.5, -98.35], 4);
+
+map.setMaxBounds([
+  [24.5, -124.8],
+  [49.5, -66.9]
+]);
+
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  attribution: "© OpenStreetMap"
+}).addTo(map);
+
+// -------------------------------
+const regionCoords = {
+  NUS: [39.5, -98.35],
+  STX: [31.0, -99.0],
+  SCA: [36.7, -119.4],
+  SCO: [39.0, -105.5],
+  SFL: [27.8, -81.7],
+  SMA: [42.3, -71.8],
+  SMN: [46.3, -94.2],
+  SNY: [42.9, -75.0],
+  SOH: [40.3, -82.8],
+  SWA: [47.4, -120.5],
+
+  Y05LA: [34.05, -118.25],
+  Y05SF: [37.77, -122.42],
+  Y35NY: [40.71, -74.01],
+  Y44HO: [29.76, -95.37],
+  Y48SE: [47.61, -122.33],
+  YBOS: [42.36, -71.06],
+  YDEN: [39.74, -104.99],
+  YMIA: [25.76, -80.19],
+  YORD: [41.88, -87.63]
+};
+
+let anchors = [];
+let routeLine;
+let stopMarkers = [];
+const hoverPopup = L.popup();
+
+// -------------------------------
+// GEOCODE
+// -------------------------------
+async function geocode(place) {
+  const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(place)}`;
+  const res = await fetch(url);
+  const data = await res.json();
+
+  if (!data.length) return null;
+
+  return {
+    lat: parseFloat(data[0].lat),
+    lng: parseFloat(data[0].lon)
+  };
+}
+
+// -------------------------------
+// ROUTE API
+// -------------------------------
+async function getRoadRoute(start, end) {
+
+  const res = await fetch(
+    `/api/route?startLat=${start.lat}&startLng=${start.lng}&endLat=${end.lat}&endLng=${end.lng}`
+  );
+
+  const data = await res.json();
+
+  if (!data.features) return [];
+
+  return data.features[0].geometry.coordinates;
+}
+
+// -------------------------------
+function getDistanceMiles(lat1, lon1, lat2, lon2) {
+  const R = 3958.8;
+  const toRad = v => v * Math.PI / 180;
+
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) *
+    Math.cos(toRad(lat2)) *
+    Math.sin(dLon / 2) ** 2;
+
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+// -------------------------------
+// PRICE INTERPOLATION
+// -------------------------------
+function interpolate(lat, lng) {
+  if (!anchors.length) return 0;
+
+  let num = 0;
+  let den = 0;
+  const k = 2;
+
+  for (const a of anchors) {
+    const d = Math.sqrt(
+      (lat - a.lat) ** 2 +
+      (lng - a.lng) ** 2
+    ) + 0.00001;
+
+    const w = 1 / Math.pow(d, k);
+
+    num += a.price * w;
+    den += w;
+  }
+
+  return num / den;
+}
+
+// -------------------------------
+// 🧠 OPTIMAL FUEL STOP SYSTEM (NEW)
+// -------------------------------
+function generateFuelStops(latlngs, fuelRange) {
+
+  stopMarkers.forEach(m => map.removeLayer(m));
+  stopMarkers = [];
+
+  const sampleStep = 8;
+  const sampled = [];
+
+  for (let i = 0; i < latlngs.length; i += sampleStep) {
+    sampled.push(latlngs[i]);
+  }
+
+  let tankMiles = 0;
+  let last = null;
+
+  let bestStop = null;
+  let bestPrice = Infinity;
+
+  for (let i = 0; i < sampled.length; i++) {
+
+    const [lat, lng] = sampled[i];
+
+    if (last) {
+      tankMiles += getDistanceMiles(last[0], last[1], lat, lng);
+    }
+
+    const price = interpolate(lat, lng);
+
+    if (price < bestPrice) {
+      bestPrice = price;
+      bestStop = [lat, lng];
+    }
+
+    if (tankMiles >= fuelRange) {
+
+      if (bestStop) {
+        const marker = L.circleMarker(bestStop, {
+          radius: 10,
+          color: "black",
+          fillColor: "#2ecc71",
+          fillOpacity: 0.9
+        }).addTo(map)
+          .bindPopup(`⛽ Optimal Stop<br>Price: $${bestPrice.toFixed(2)}`);
+
+        stopMarkers.push(marker);
+      }
+
+      tankMiles = 0;
+      bestStop = null;
+      bestPrice = Infinity;
+    }
+
+    last = [lat, lng];
+  }
+}
+
+// -------------------------------
+// DRAW ROUTE
+// -------------------------------
+async function drawRoute() {
+
+  const o = await geocode(document.getElementById("origin").value);
+  const d = await geocode(document.getElementById("dest").value);
+
+  const mpg = parseFloat(document.getElementById("mpg").value);
+  const range = parseFloat(document.getElementById("range").value);
+
+  if (!o || !d || !mpg || !range) return;
+
+  const coords = await getRoadRoute(o, d);
+
+  const latlngs = coords.map(c => [c[1], c[0]]);
+
+  if (routeLine) map.removeLayer(routeLine);
+
+  routeLine = L.polyline(latlngs, {
+    color: "blue",
+    weight: 5
+  }).addTo(map);
+
+  map.fitBounds(routeLine.getBounds());
+
+  generateFuelStops(latlngs, range);
+
+  const distanceMiles = getDistanceMiles(o.lat, o.lng, d.lat, d.lng);
+
+  const avgPrice =
+    anchors.reduce((s, a) => s + a.price, 0) / (anchors.length || 1);
+
+  const gallons = distanceMiles / mpg;
+  const totalCost = gallons * avgPrice;
+
+  document.getElementById("costBox").innerText =
+    `💰 Cost: $${totalCost.toFixed(2)}`;
+}
+
+// -------------------------------
+// LOAD GAS DATA
+// -------------------------------
+fetch("/api/gas/us/map")
+  .then(r => r.json())
+  .then(data => {
+
+    const regions = data.regions || {};
+    anchors = [];
+
+    Object.keys(regions).forEach(key => {
+
+      const coords = regionCoords[key];
+      const price = Number(regions[key].gasoline);
+
+      if (!coords || isNaN(price)) return;
+
+      anchors.push({
+        lat: coords[0],
+        lng: coords[1],
+        price
+      });
+
+      const marker = L.circleMarker(coords, {
+        radius: 7,
+        color: "#e74c3c",
+        fillOpacity: 0.7
+      }).addTo(map);
+
+      marker.bindPopup(`⛽ Gas Price: $${price.toFixed(2)}`);
+    });
+
+    map.on("mousemove", (e) => {
+      if (!anchors.length) return;
+
+      const price = interpolate(e.latlng.lat, e.latlng.lng);
+
+      hoverPopup
+        .setLatLng(e.latlng)
+        .setContent(`⛽ Estimated Gas: $${price.toFixed(2)}`)
+        .openOn(map);
+    });
+
+  });
+
+</script>
+
+</body>
+</html>
