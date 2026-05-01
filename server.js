@@ -4,14 +4,22 @@ const cors = require("cors");
 require("dotenv").config();
 
 const app = express();
+
 app.use(cors());
+app.use(express.json());
 app.use(express.static("public"));
 
 const EIA_KEY = process.env.EIA_KEY;
 const ORS_KEY = process.env.ORS_KEY;
 
 // -------------------------------
-// GAS MAP ROUTE (PROTECTED)
+// BASIC SAFETY CHECK (IMPORTANT)
+// -------------------------------
+if (!EIA_KEY) console.warn("⚠️ Missing EIA_KEY");
+if (!ORS_KEY) console.warn("⚠️ Missing ORS_KEY");
+
+// -------------------------------
+// GAS MAP ROUTE
 // -------------------------------
 app.get("/api/gas/us/map", async (req, res) => {
   try {
@@ -75,7 +83,8 @@ app.get("/api/gas/us/map", async (req, res) => {
     });
 
   } catch (err) {
-    console.log(err.message);
+    console.log("EIA ERROR:", err.response?.data || err.message);
+
     res.status(500).json({
       error: "failed to build map data",
       details: err.message
@@ -84,34 +93,47 @@ app.get("/api/gas/us/map", async (req, res) => {
 });
 
 // -------------------------------
-// ROUTE API (OPENROUTESERVICE)
+// ROUTE API (FIXED + MORE RELIABLE)
 // -------------------------------
 app.get("/api/route", async (req, res) => {
   try {
     const { startLat, startLng, endLat, endLng } = req.query;
 
+    if (!startLat || !startLng || !endLat || !endLng) {
+      return res.status(400).json({
+        error: "missing coordinates"
+      });
+    }
+
+    const body = {
+      coordinates: [
+        [Number(startLng), Number(startLat)],
+        [Number(endLng), Number(endLat)]
+      ]
+    };
+
     const response = await axios.post(
       "https://api.openrouteservice.org/v2/directions/driving-car/geojson",
-      {
-        coordinates: [
-          [parseFloat(startLng), parseFloat(startLat)],
-          [parseFloat(endLng), parseFloat(endLat)]
-        ]
-      },
+      body,
       {
         headers: {
           Authorization: ORS_KEY,
-          "Content-Type": "application/json"
-        }
+          "Content-Type": "application/json",
+          Accept: "application/json"
+        },
+        timeout: 10000
       }
     );
 
     res.json(response.data);
 
   } catch (err) {
+    console.log("ORS ERROR:");
+    console.log(err.response?.data || err.message);
+
     res.status(500).json({
       error: "route failed",
-      details: err.message
+      details: err.response?.data || err.message
     });
   }
 });
