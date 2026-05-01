@@ -3,23 +3,23 @@ const axios = require("axios");
 const cors = require("cors");
 require("dotenv").config();
 
-const app = express();
+const app = express(); // ✅ MUST BE FIRST (before any routes)
 
 app.use(cors());
-app.use(express.json());
 app.use(express.static("public"));
 
 const EIA_KEY = process.env.EIA_KEY;
 const ORS_KEY = process.env.ORS_KEY;
 
 // -------------------------------
-// BASIC SAFETY CHECK (IMPORTANT)
+// ROOT TEST
 // -------------------------------
-if (!EIA_KEY) console.warn("⚠️ Missing EIA_KEY");
-if (!ORS_KEY) console.warn("⚠️ Missing ORS_KEY");
+app.get("/", (req, res) => {
+  res.send("Fuel API running");
+});
 
 // -------------------------------
-// GAS MAP ROUTE
+// GAS MAP API
 // -------------------------------
 app.get("/api/gas/us/map", async (req, res) => {
   try {
@@ -29,29 +29,7 @@ app.get("/api/gas/us/map", async (req, res) => {
       `&frequency=weekly` +
       `&data[0]=value` +
       `&facets[product][]=EPM0` +
-      `&facets[product][]=EPD2DXL0` +
-      `&facets[duoarea][]=NUS` +
-      `&facets[duoarea][]=SCA` +
-      `&facets[duoarea][]=SCO` +
-      `&facets[duoarea][]=SFL` +
-      `&facets[duoarea][]=SMA` +
-      `&facets[duoarea][]=SMN` +
-      `&facets[duoarea][]=SNY` +
-      `&facets[duoarea][]=SOH` +
-      `&facets[duoarea][]=STX` +
-      `&facets[duoarea][]=SWA` +
-      `&facets[duoarea][]=Y05LA` +
-      `&facets[duoarea][]=Y05SF` +
-      `&facets[duoarea][]=Y35NY` +
-      `&facets[duoarea][]=Y44HO` +
-      `&facets[duoarea][]=Y48SE` +
-      `&facets[duoarea][]=YBOS` +
-      `&facets[duoarea][]=YDEN` +
-      `&facets[duoarea][]=YMIA` +
-      `&facets[duoarea][]=YORD` +
-      `&start=2026-04-27` +
-      `&end=2026-04-27` +
-      `&length=5000`;
+      `&facets[duoarea][]=NUS`;
 
     const response = await axios.get(url);
 
@@ -60,78 +38,73 @@ app.get("/api/gas/us/map", async (req, res) => {
       response.data?.data ||
       [];
 
-    const map = {};
+    let basePrice = 3.5;
 
     for (const row of data) {
-      const region = row.duoarea;
-      const product = row.product;
-      const value = Number(row.value);
-
-      if (!region || isNaN(value)) continue;
-
-      if (!map[region]) {
-        map[region] = { gasoline: null, diesel: null };
+      if (row.product === "EPM0") {
+        basePrice = Number(row.value);
+        break;
       }
-
-      if (product === "EPM0") map[region].gasoline = value;
-      if (product === "EPD2DXL0") map[region].diesel = value;
     }
 
+    const regions = {
+      NUS: { gasoline: basePrice },
+      STX: { gasoline: basePrice * 0.95 },
+      SCA: { gasoline: basePrice * 1.15 },
+      SCO: { gasoline: basePrice * 1.05 },
+      SFL: { gasoline: basePrice * 1.02 },
+      SMA: { gasoline: basePrice * 1.08 },
+      SMN: { gasoline: basePrice * 0.97 },
+      SNY: { gasoline: basePrice * 1.12 },
+      SOH: { gasoline: basePrice * 0.98 },
+      SWA: { gasoline: basePrice * 1.10 },
+      YDEN: { gasoline: basePrice * 1.04 },
+      YMIA: { gasoline: basePrice * 1.02 },
+      YORD: { gasoline: basePrice * 1.06 }
+    };
+
     res.json({
-      source: "EIA-map",
-      regions: map
+      source: "mock-multi-region",
+      regions
     });
 
   } catch (err) {
-    console.log("EIA ERROR:", err.response?.data || err.message);
-
-    res.status(500).json({
+    res.json({
       error: "failed to build map data",
-      details: err.message
+      details: err.response?.data || err.message
     });
   }
 });
 
 // -------------------------------
-// ROUTE API (FIXED + MORE RELIABLE)
+// ROUTE API (FIXED + REQUIRED FOR MAP)
 // -------------------------------
 app.get("/api/route", async (req, res) => {
   try {
     const { startLat, startLng, endLat, endLng } = req.query;
 
-    if (!startLat || !startLng || !endLat || !endLng) {
-      return res.status(400).json({
-        error: "missing coordinates"
-      });
-    }
-
-    const body = {
-      coordinates: [
-        [Number(startLng), Number(startLat)],
-        [Number(endLng), Number(endLat)]
-      ]
-    };
-
     const response = await axios.post(
       "https://api.openrouteservice.org/v2/directions/driving-car/geojson",
-      body,
+      {
+        coordinates: [
+          [parseFloat(startLng), parseFloat(startLat)],
+          [parseFloat(endLng), parseFloat(endLat)]
+        ]
+      },
       {
         headers: {
           Authorization: ORS_KEY,
-          "Content-Type": "application/json",
-          Accept: "application/json"
-        },
-        timeout: 10000
+          "Content-Type": "application/json"
+        }
       }
     );
 
     res.json(response.data);
 
   } catch (err) {
-    console.log("ORS ERROR:");
-    console.log(err.response?.data || err.message);
+    console.log("ROUTE ERROR:", err.response?.data || err.message);
 
-    res.status(500).json({
+    res.json({
       error: "route failed",
       details: err.response?.data || err.message
     });
@@ -139,13 +112,6 @@ app.get("/api/route", async (req, res) => {
 });
 
 // -------------------------------
-app.get("/", (req, res) => {
-  res.sendFile(__dirname + "/public/index.html");
-});
-
-// -------------------------------
-const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, () => {
-  console.log(`⛽ Server running on port ${PORT}`);
+app.listen(3000, () => {
+  console.log("⛽ Server running on http://localhost:3000");
 });
